@@ -1,67 +1,77 @@
 #include <iostream>
-#include <array>
+#include <locale>
 #include <vector>
-#include <string_view>
 #include <memory>
 #include <unordered_map>
+#include <queue>
 #include <limits>
-#include <charconv>
+#include <functional>
+#include <list>
 
-using std::cout;
+using std::cout, std::cin, std::locale;
 
-using Input = std::array<std::string_view, 9>;
-using VectorStrView = std::vector<std::string_view>;
-using MatrixWeight = std::unordered_map<std::string_view, std::unordered_map<std::string_view, int>>;
+struct Delimiter: std::ctype<char> {
+    static const mask* make_table(std::string ds) {
+        static std::vector<mask> v(classic_table(),
+                                   classic_table() + table_size);
+        for (auto mask: v) {
+            mask &= ~space;
+        }
+        for (auto d: ds) {
+            v[d] |= space;
+        }
+        return &v[0];
+    }
+    Delimiter(std::string ds, size_t refs = 0):
+        ctype(make_table(ds), false, refs) {}
+};
 
 struct Node;
-
+using NodePtr = std::shared_ptr<Node>;
 struct Aux {
-    std::shared_ptr<Node> pred = nullptr;
+    NodePtr prev = nullptr;
     int dist = std::numeric_limits<int>::max();
     bool visited = false;
 };
 
 struct Node {
-    std::string_view label;
+    std::string label;
     Aux aux;
-    std::vector<std::shared_ptr<Node>> adj;
-    Node(const std::string_view& label):
+    std::vector<NodePtr> adj;
+    Node(std::string label):
         label(label){}
 };
 
-using NodePtr = std::shared_ptr<Node>;
-using NodesMap = std::unordered_map<std::string_view, NodePtr>;
-using NodesPtrVec = std::vector<NodePtr>;
-
 std::ostream& operator<<(std::ostream& os, const Aux& aux) {
-    os << "("
-       << "pred:" << (aux.pred ? aux.pred->label :  "null") << ", "
-       << "dist:" << aux.dist << ", "
-       << "visi:" << aux.visited
+    os << "(pred:" << (aux.prev ? aux.prev->label : "none")
+       << ", dist:" << aux.dist
+       << ", visi:" << aux.visited
        << ")";
     return os;
 }
 
-std::ostream& operator<<(std::ostream& os, const NodesPtrVec& v) {
-    os << "[";
-    for (size_t i = 0; i < v.size(); ++i) {
-        os << v[i]->label;
-        if (i < v.size() - 1) os << ", ";
+std::ostream& operator<<(std::ostream& os, const NodePtr n) {
+    os << "  ("
+       << n->label
+       << ")[";
+    for (size_t i = 0; i < n->adj.size(); ++i) {
+        os << n->adj[i]->label;
+        if (i < n->adj.size() - 1) os << ", ";
     }
-    os << "]";
+    os<< "]" << n->aux << "\n";
     return os;
 }
 
-std::ostream& operator<<(std::ostream& os, const NodePtr& ptr) {
-    os << "  " << ptr->aux
-       << " - ("
-       << ptr->label
-       << ")->"
-       << ptr->adj << '\n';
-    return os;
+using NodeMap = std::unordered_map<std::string, NodePtr>;
+
+void addEntry(NodeMap& nodes,
+              const std::string& label) {
+    if (nodes.find(label) == nodes.end()) {
+        nodes[label] = std::make_shared<Node>(label);
+    }
 }
 
-std::ostream& operator<<(std::ostream& os, const NodesMap& m) {
+std::ostream& operator<<(std::ostream& os, const NodeMap& m) {
     os << "{\n";
     for (auto [key, value]: m) {
         os << value;
@@ -70,92 +80,67 @@ std::ostream& operator<<(std::ostream& os, const NodesMap& m) {
     return os;
 }
 
-void addNode(NodesMap& nodes,
-             const std::string_view& label) {
-    if (nodes.find(label) == nodes.end()) {
-        nodes[label] = std::make_shared<Node>(label);
-    }
-}
+using Cmp = std::function<bool(NodePtr, NodePtr)>;
+using QNodePtr = std::priority_queue<NodePtr, std::vector<NodePtr>, Cmp>;
+using NodeMatrix = std::unordered_map<std::string, std::unordered_map<std::string, int>>;
 
-VectorStrView split(const std::string_view& str,
-                    char d = ' ') {
-    VectorStrView result;
-    result.reserve(str.size());
-    int s = 0, e = str.find(d);
-    while (e != std::string::npos) {
-        result.push_back(str.substr(s, e - s));
-        s = e + 1;
-        e = str.find(d, s);
-    }
-    result.push_back(str.substr(s, e - s));
-    return result;
-}
-
-bool isAllVisited(NodesMap& nodes) {
-    for (auto [key, value]: nodes) {
-        if (!value->aux.visited) return false;
-    }
-    return true;
-}
-
-NodePtr minDistance(NodesMap& nodes) {
-    NodePtr result = nullptr;
-    int m = std::numeric_limits<int>::max();
-    for (auto [key, value]: nodes) {
-        if (value->aux.visited) continue;
-        if (value->aux.dist < m) {
-            m = value->aux.dist;
-            result = value;
-        }
-    }
-    return result;
-}
-
-VectorStrView dijkstra(NodesMap& nodes,
-                       MatrixWeight& mw,
-                       const std::string_view& src,
-                       const std::string_view& dst) {
-    VectorStrView result;
+std::list<NodePtr> dijkstra(NodeMap& nodes,
+                              NodeMatrix& weights,
+                              const std::string& src,
+                              const std::string& dst) {
+    Cmp cmp = [](NodePtr a, NodePtr b) {
+        return a->aux.dist > b->aux.dist;
+    };
+    QNodePtr q(cmp);
+    std::list<NodePtr> result;
     nodes[src]->aux.dist = 0;
-    while (!isAllVisited(nodes)) {
-        NodePtr u = minDistance(nodes);
+    q.push(nodes[src]);
+    while (!q.empty()) {
+        NodePtr u = q.top(); q.pop();
         u->aux.visited = true;
+//        cout << "u:" << u << "\n";
         for (auto v: u->adj) {
             if (v->aux.visited) continue;
-            if (u->aux.dist + mw[u->label][v->label] < v->aux.dist) {
-                v->aux.dist = u->aux.dist + mw[u->label][v->label];
-                v->aux.pred = u;
+            if (u->aux.dist + weights[u->label][v->label] < v->aux.dist) {
+                v->aux.dist = u->aux.dist + weights[u->label][v->label];
+                v->aux.prev = u;
+                q.push(v);
+//                cout << "relax:\n" << u << v << "\n";
             }
         }
     }
+    NodePtr aux = nodes[dst];
+    while (aux != nullptr) {
+        result.push_front(aux);
+        aux = aux->aux.prev;
+
+    }
     return result;
 }
 
-int main() {
-    Input input = {
-        "node0:10:node1",
-        "node0:5:node2",
-        "node1:1:node3",
-        "node2:3:node1",
-        "node2:8:node3",
-        "node2:2:node4",
-        "node3:4:node5",
-        "node3:4:node4",
-        "node4:6:node5"
-    };
-    NodesMap nodes;
-    MatrixWeight mw;
-    for (auto i: input) {
-        VectorStrView arr = split(i, ':');
-        addNode(nodes, arr[0]);
-        addNode(nodes, arr[2]);
-        nodes[arr[0]]->adj.push_back(nodes[arr[2]]);
-        int weight;
-        std::from_chars(arr[1].data(), arr[1].data() + arr[1].size(), weight);
-        mw[arr[0]][arr[2]] = weight;
+int main(int argc, char** argv) {
+    std::ios::sync_with_stdio(false);
+    cin.tie(nullptr);
+    cin.imbue(locale(cin.getloc(), new Delimiter(":")));
+    std::string src, dst;
+    int weight;
+    NodeMap nodes;
+    NodeMatrix weights;
+    std::string s, d;
+    cin >> s >> d;
+    while (cin >> src >> weight >> dst) {
+        addEntry(nodes, src);
+        addEntry(nodes, dst);
+        nodes[src]->adj.push_back(nodes[dst]);
+        weights[src][dst] = weight;
     }
-    dijkstra(nodes, mw, "node0", "node5");
-    cout << nodes << '\n';
-
+    std::list<NodePtr> path = dijkstra(nodes, weights, s, d);
+    size_t i = 0;
+    for (auto n: path) {
+        cout << n->label;
+        if (i++ < path.size() - 1) cout << "->";
+    }
+    cout << " = " << nodes[dst]->aux.dist << '\n';
+//    cout << nodes << '\n';
     return 0;
 }
